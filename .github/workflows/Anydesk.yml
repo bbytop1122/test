@@ -1,0 +1,107 @@
+name: "🖥️ AnyDesk Host"
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: "Unattended access password (min 8 chars)"
+        required: true
+      keepalive_minutes:
+        description: "Keep alive in minutes (max 360)"
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: anydesk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  anydesk:
+    name: "Install & Run AnyDesk"
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: "📝 Stage password"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path "$env:RUNNER_TEMP\pwd.txt" -Value '${{ inputs.password }}' -NoNewline
+          Set-Content -Path "$env:RUNNER_TEMP\keep.txt" -Value '${{ inputs.keepalive_minutes }}' -NoNewline
+          Write-Host "✅ Staged."
+
+      - name: "🖥️ Install AnyDesk"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference    = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $pwd   = (Get-Content "$env:RUNNER_TEMP\pwd.txt" -Raw).Trim()
+          $keep  = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
+          if ($keep -lt 1)   { $keep = 1 }
+          if ($keep -gt 360) { $keep = 360 }
+
+          if ($pwd.Length -lt 8) {
+            Write-Error "❌ Password must be at least 8 characters."
+            exit 1
+          }
+          Write-Host "::add-mask::$pwd"
+
+          # --- Download AnyDesk ---
+          $url = "https://download.anydesk.com/AnyDesk.exe"
+          $exe = Join-Path $env:RUNNER_TEMP "AnyDesk.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 120
+          Write-Host "⬇️  Downloaded AnyDesk."
+
+          # --- Silent install ---
+          $installDir = "$env:ProgramFiles\AnyDesk"
+          $p = Start-Process -FilePath $exe `
+            -ArgumentList "--install", "`"$installDir`"", "--start-with-win", "--silent" `
+            -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) {
+            Write-Error "❌ Install failed (exit $($p.ExitCode))"
+            exit 1
+          }
+          Write-Host "✅ Installed."
+
+          # --- Set unattended password ---
+          $anydesk = Join-Path $installDir "AnyDesk.exe"
+          if (-not (Test-Path $anydesk)) {
+            Write-Error "❌ AnyDesk.exe not found at $anydesk"
+            exit 1
+          }
+
+          $pwd | & $anydesk --set-password
+          Write-Host "✅ Unattended password set."
+
+          # --- Get AnyDesk ID ---
+          $idFile = "$env:ProgramData\AnyDesk\system.conf"
+          $id = $null
+          if (Test-Path $idFile) {
+            $content = Get-Content $idFile -Raw
+            if ($content -match 'ad\.anydesk\.id=(\d+)') {
+              $id = $matches[1]
+            }
+          }
+
+          Write-Host "==============================================="
+          if ($id) {
+            Write-Host "🔗 AnyDesk ID: $id"
+          } else {
+            Write-Warning "⚠️ AnyDesk ID not found in config. Check service status."
+          }
+          Write-Host "🔐 Password: (jo aapne input me diya)"
+          Write-Host "==============================================="
+
+          # --- Keep alive ---
+          if ($keep -gt 0) {
+            Write-Host "⏳ Keeping alive for $keep minute(s)..."
+            Start-Sleep -Seconds ($keep * 60)
+          }
+
+          Write-Host "🛑 Done."
