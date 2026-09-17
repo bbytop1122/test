@@ -1,0 +1,145 @@
+name: "🖥️ Chrome Remote Desktop Host"
+
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "Full remoting_start_host.exe command OR just the 4/... token from https://remotedesktop.google.com/headless"
+        required: true
+      pin:
+        description: "CRD PIN (6+ digits)"
+        required: true
+        default: "123456"
+      retries:
+        description: "Retries for start-host"
+        required: false
+        default: "3"
+      keepalive_hours:
+        description: "Keep host online for N hours (max 6)"
+        required: false
+        default: "6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crd-register-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  crd:
+    name: "Register CRD Host"
+    runs-on: windows-2022
+
+    env:
+      RAW_CODE:   ${{ inputs.code }}
+      PIN_INPUT:  ${{ inputs.pin }}
+      RETRIES:    ${{ inputs.retries }}
+      KEEP_HOURS: ${{ inputs.keepalive_hours }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: "🔧 Setup, install, register, keep-alive"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference    = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          Write-Host "==============================================="
+          Write-Host "💻 OS        : $env:ImageOS"
+          Write-Host "🧠 Runner    : $env:RUNNER_NAME"
+          Write-Host "🏷️ Repo      : $env:GITHUB_REPOSITORY"
+          Write-Host "🔁 Run ID    : $env:GITHUB_RUN_ID"
+          Write-Host "==============================================="
+
+          # --- mask sensitive inputs in logs ---
+          if ($env:RAW_CODE)  { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+
+          # --- parse & validate token ---
+          $raw = $env:RAW_CODE.Trim()
+          if ($raw -match '--code="?([^"\s]+)"?') { $raw = $matches[1] }
+          if ($raw -notmatch '^4/') {
+            Write-Error "❌ Input 'code' does not look like a 4/... token."
+            exit 1
+          }
+          if ($env:PIN_INPUT -notmatch '^\d{6,}$') {
+            Write-Error "❌ PIN must be at least 6 digits."
+            exit 1
+          }
+          Write-Host "🔐 Token length: $($raw.Length) | PIN length: $($env:PIN_INPUT.Length)"
+
+          # --- download CRD installer ---
+          $msi = Join-Path $env:RUNNER_TEMP "crdhost.msi"
+          $url = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+          $dlAttempts = [Math]::Max(3, [int]$env:RETRIES)
+
+          for ($i = 1; $i -le $dlAttempts; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing -TimeoutSec 120
+              if ((Test-Path $msi) -and ((Get-Item $msi).Length -gt 0)) { break }
+              throw "Zero-byte download"
+            } catch {
+              if ($i -eq $dlAttempts) { throw }
+              Start-Sleep -Seconds ($i * 2)
+            }
+          }
+          Write-Host "⬇️  Downloaded $((Get-Item $msi).Length) bytes"
+
+          # --- silent install ---
+          $log = Join-Path $env:RUNNER_TEMP "crd-install.log"
+          $p = Start-Process msiexec.exe `
+            -ArgumentList "/i","`"$msi`"","/qn","/norestart","/L*v","`"$log`"" `
+            -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) {
+            Get-Content $log -Tail 80 | Write-Host
+            Write-Error "❌ MSI install failed (exit $($p.ExitCode))"
+            exit 1
+          }
+          Write-Host "✅ CRD host installed."
+
+          # --- register host ---
+          $exe = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "❌ Host binary not found: $exe"
+            exit 1
+          }
+
+          $ok = $false
+          for ($i = 1; $i -le [int]$env:RETRIES -and -not $ok; $i++) {
+            Write-Host "▶️ Register attempt $i/$($env:RETRIES)"
+            $args = @(
+              "--code=$raw"
+              "--redirect-url=https://remotedesktop.google.com/_/oauthredirect"
+              "--name=$env:COMPUTERNAME"
+              "--pin=$($env:PIN_INPUT)"
+            )
+            $p = Start-Process -FilePath $exe -ArgumentList $args -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -eq 0) { $ok = $true; Write-Host "✅ Registered." }
+            else { Write-Host "⚠️ Exit $($p.ExitCode)"; Start-Sleep -Seconds 5 }
+          }
+          if (-not $ok) { Write-Error "❌ Registration failed."; exit 1 }
+
+          # --- verify ---
+          $svc = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+          if ($svc) { Write-Host "🟢 chromoting: $($svc.Status)" }
+
+          # --- keep-alive so the host stays online ---
+          $hours = 6
+          try { $hours = [int]$env:KEEP_HOURS } catch {}
+          if ($hours -gt 6) { $hours = 6 }
+          if ($hours -lt 0) { $hours = 0 }
+
+          if ($hours -gt 0) {
+            $secs = $hours * 3600
+            Write-Host "==============================================="
+            Write-Host "🔗 https://remotedesktop.google.com/access"
+            Write-Host "⏳ Keeping host online for $hours hour(s)..."
+            Write-Host "==============================================="
+            Start-Sleep -Seconds $secs
+          }
+
+          Write-Host "🛑 Done."
