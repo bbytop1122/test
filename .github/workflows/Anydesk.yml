@@ -1,107 +1,89 @@
-name: "🖥️ AnyDesk Host"
+- name: "🖥️ Install AnyDesk + Get ID"
+  run: |
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference    = 'SilentlyContinue'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-on:
-  workflow_dispatch:
-    inputs:
-      password:
-        description: "Unattended access password (min 8 chars)"
-        required: true
-      keepalive_minutes:
-        description: "Keep alive in minutes (max 360)"
-        required: false
-        default: "60"
+    $pwd   = (Get-Content "$env:RUNNER_TEMP\pwd.txt" -Raw).Trim()
+    $keep  = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
+    if ($keep -lt 1)   { $keep = 1 }
+    if ($keep -gt 360) { $keep = 360 }
 
-permissions:
-  contents: read
+    if ($pwd.Length -lt 8) { Write-Error "❌ Password min 8 chars."; exit 1 }
+    Write-Host "::add-mask::$pwd"
 
-concurrency:
-  group: anydesk-${{ github.ref }}
-  cancel-in-progress: false
+    # --- Download ---
+    $url = "https://download.anydesk.com/AnyDesk.exe"
+    $exe = Join-Path $env:RUNNER_TEMP "AnyDesk.exe"
+    Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 120
 
-jobs:
-  anydesk:
-    name: "Install & Run AnyDesk"
-    runs-on: windows-2022
+    # --- Silent install ---
+    $installDir = "$env:ProgramFiles\AnyDesk"
+    $p = Start-Process -FilePath $exe `
+      -ArgumentList "--install", "`"$installDir`"", "--start-with-win", "--silent" `
+      -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { Write-Error "❌ Install failed ($($p.ExitCode))"; exit 1 }
+    Write-Host "✅ Installed."
 
-    defaults:
-      run:
-        shell: pwsh
+    $anydesk = Join-Path $installDir "AnyDesk.exe"
 
-    steps:
-      - name: "📝 Stage password"
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Set-Content -Path "$env:RUNNER_TEMP\pwd.txt" -Value '${{ inputs.password }}' -NoNewline
-          Set-Content -Path "$env:RUNNER_TEMP\keep.txt" -Value '${{ inputs.keepalive_minutes }}' -NoNewline
-          Write-Host "✅ Staged."
+    # --- ⚡ WAIT for service to be ready (crucial!) ---
+    Write-Host "⏳ Waiting for AnyDesk service to initialize..."
+    $svc = $null
+    for ($i = 1; $i -le 30; $i++) {
+      $svc = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+      if ($svc -and $svc.Status -eq 'Running') { break }
+      Start-Sleep -Seconds 2
+    }
+    if (-not $svc -or $svc.Status -ne 'Running') {
+      Write-Warning "⚠️ AnyDesk service not Running after 60s."
+    } else {
+      Write-Host "🟢 AnyDesk service: $($svc.Status)"
+    }
 
-      - name: "🖥️ Install AnyDesk"
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ProgressPreference    = 'SilentlyContinue'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # --- Set password ---
+    $pwd | & $anydesk --set-password
+    Write-Host "✅ Password set."
 
-          $pwd   = (Get-Content "$env:RUNNER_TEMP\pwd.txt" -Raw).Trim()
-          $keep  = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
-          if ($keep -lt 1)   { $keep = 1 }
-          if ($keep -gt 360) { $keep = 360 }
+    # --- ⚡ WAIT for service.conf to appear ---
+    $conf = "$env:ProgramData\AnyDesk\service.conf"
+    $id = $null
+    for ($i = 1; $i -le 30; $i++) {
+      if (Test-Path $conf) {
+        $content = Get-Content $conf -Raw -ErrorAction SilentlyContinue
+        if ($content -match 'ad\.anynet\.id\s*=\s*(\d+)') {
+          $id = $matches[1]
+          break
+        }
+      }
+      Start-Sleep -Seconds 2
+    }
 
-          if ($pwd.Length -lt 8) {
-            Write-Error "❌ Password must be at least 8 characters."
-            exit 1
-          }
-          Write-Host "::add-mask::$pwd"
+    # --- Fallback: query via CLI ---
+    if (-not $id) {
+      try {
+        $out = & $anydesk --get-id 2>&1 | Out-String
+        if ($out -match '(\d{9,10})') { $id = $matches[1] }
+      } catch {}
+    }
 
-          # --- Download AnyDesk ---
-          $url = "https://download.anydesk.com/AnyDesk.exe"
-          $exe = Join-Path $env:RUNNER_TEMP "AnyDesk.exe"
-          Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -TimeoutSec 120
-          Write-Host "⬇️  Downloaded AnyDesk."
+    Write-Host "==============================================="
+    if ($id) {
+      Write-Host "🔗 AnyDesk ID: $id"
+    } else {
+      Write-Host "❌ ID not detected. Dumping config folder:"
+      Get-ChildItem "$env:ProgramData\AnyDesk" -ErrorAction SilentlyContinue | Format-Table Name, Length
+      if (Test-Path $conf) {
+        Write-Host "--- service.conf (first 20 lines) ---"
+        Get-Content $conf -TotalCount 20
+      }
+    }
+    Write-Host "🔐 Password: (aapne jo diya)"
+    Write-Host "==============================================="
 
-          # --- Silent install ---
-          $installDir = "$env:ProgramFiles\AnyDesk"
-          $p = Start-Process -FilePath $exe `
-            -ArgumentList "--install", "`"$installDir`"", "--start-with-win", "--silent" `
-            -Wait -PassThru -NoNewWindow
-          if ($p.ExitCode -ne 0) {
-            Write-Error "❌ Install failed (exit $($p.ExitCode))"
-            exit 1
-          }
-          Write-Host "✅ Installed."
-
-          # --- Set unattended password ---
-          $anydesk = Join-Path $installDir "AnyDesk.exe"
-          if (-not (Test-Path $anydesk)) {
-            Write-Error "❌ AnyDesk.exe not found at $anydesk"
-            exit 1
-          }
-
-          $pwd | & $anydesk --set-password
-          Write-Host "✅ Unattended password set."
-
-          # --- Get AnyDesk ID ---
-          $idFile = "$env:ProgramData\AnyDesk\system.conf"
-          $id = $null
-          if (Test-Path $idFile) {
-            $content = Get-Content $idFile -Raw
-            if ($content -match 'ad\.anydesk\.id=(\d+)') {
-              $id = $matches[1]
-            }
-          }
-
-          Write-Host "==============================================="
-          if ($id) {
-            Write-Host "🔗 AnyDesk ID: $id"
-          } else {
-            Write-Warning "⚠️ AnyDesk ID not found in config. Check service status."
-          }
-          Write-Host "🔐 Password: (jo aapne input me diya)"
-          Write-Host "==============================================="
-
-          # --- Keep alive ---
-          if ($keep -gt 0) {
-            Write-Host "⏳ Keeping alive for $keep minute(s)..."
-            Start-Sleep -Seconds ($keep * 60)
-          }
-
-          Write-Host "🛑 Done."
+    # --- Keep alive ---
+    if ($keep -gt 0) {
+      Write-Host "⏳ Keeping alive for $keep minute(s)..."
+      Start-Sleep -Seconds ($keep * 60)
+    }
+    Write-Host "🛑 Done."
