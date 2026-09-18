@@ -39,6 +39,11 @@ jobs:
         shell: pwsh
 
     steps:
+      - name: "📦 Install winget"
+        uses: Cyberboss/install-winget@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: "📝 Stage Inputs"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -74,12 +79,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
 
-          # Winget usually available on windows-2022
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Error "winget not available"; exit 1
-          }
-
-          # Silent install — version pinned, URL rotation issue avoid [citation:2][citation:10]
+          # Winget now installed by previous step
           winget install --id BlueStack.BlueStacks `
             --exact 5.22.166.1003 `
             --silent `
@@ -87,11 +87,8 @@ jobs:
             --accept-source-agreements
 
           Write-Host "✅ BlueStacks installed via winget"
-
-          # Wait for install to complete
           Start-Sleep -Seconds 180
 
-          # Verify
           $found = @(
             "${env:ProgramFiles}\BlueStacks_nxt\HD-Player.exe",
             "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
@@ -103,7 +100,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
 
-          # ===== 1. REGISTRY: EULA Auto-Accept =====
+          # EULA Auto-Accept
           $eulaKeys = @(
             "HKLM:\SOFTWARE\BlueStacks_nxt",
             "HKLM:\SOFTWARE\BlueStacks",
@@ -114,9 +111,8 @@ jobs:
             Set-ItemProperty -Path $ek -Name "EULA" -Value 1 -Type DWord -ErrorAction SilentlyContinue
             Set-ItemProperty -Path $ek -Name "EulaAccepted" -Value 1 -Type DWord -ErrorAction SilentlyContinue
           }
-          Write-Host "✅ EULA auto-accepted"
 
-          # ===== 2. REGISTRY: RAM + CPU + Resolution =====
+          # RAM + CPU + Resolution
           $regPaths = @(
             "HKLM:\SOFTWARE\BlueStacks_nxt\Guests\Android",
             "HKLM:\SOFTWARE\BlueStacks\Guests\Android"
@@ -138,34 +134,28 @@ jobs:
               Set-ItemProperty -Path $fp -Name "Height" -Value 480 -Type DWord -ErrorAction SilentlyContinue
             }
           }
-          Write-Host "✅ RAM/CPU/Resolution set"
 
-          # ===== 3. bluestacks.conf optimization =====
+          # bluestacks.conf optimization
           $dataDirs = @("$env:ProgramData\BlueStacks_nxt", "$env:ProgramData\BlueStacks")
           $dataDir = $dataDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
-
           if ($dataDir) {
             $confPath = Join-Path $dataDir "bluestacks.conf"
             if (Test-Path $confPath) {
               $conf = Get-Content $confPath -Raw
-              # Graphics: OpenGL (compatibility for software rendering)
               $conf = $conf -replace 'graphics_renderer="DirectX"', 'graphics_renderer="OpenGL"'
               $conf = $conf -replace 'graphics_engine="Performance"', 'graphics_engine="Compatibility"'
               $conf = $conf -replace 'enable_astc_textures="1"', 'enable_astc_textures="0"'
-              # Performance
               $conf = $conf -replace 'cpus="\d+"', 'cpus="4"'
               $conf = $conf -replace 'ram="\d+"', 'ram="4096"'
               $conf = $conf -replace 'fb_width="\d+"', 'fb_width="640"'
               $conf = $conf -replace 'fb_height="\d+"', 'fb_height="480"'
               $conf = $conf -replace 'fps="\d+"', 'fps="60"'
-              # Disable heavy features
               $conf = $conf -replace 'enable_vsync="1"', 'enable_vsync="0"'
               $conf = $conf -replace 'enable_sound="1"', 'enable_sound="0"'
               $conf = $conf -replace 'enable_webcam="1"', 'enable_webcam="0"'
               $conf = $conf -replace 'enable_mic="1"', 'enable_mic="0"'
               $conf = $conf -replace 'show_sidebar="1"', 'show_sidebar="0"'
               Set-Content -Path $confPath -Value $conf -NoNewline
-              Write-Host "✅ bluestacks.conf optimized"
             }
           }
 
@@ -173,30 +163,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $image = (Get-Content "$env:RUNNER_TEMP\image.txt" -Raw).Trim()
-
           $bsPlayer = @(
             "${env:ProgramFiles}\BlueStacks_nxt\HD-Player.exe",
             "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
           if ($bsPlayer) {
             Start-Process -FilePath $bsPlayer -ArgumentList "--instance", $image -NoNewWindow
-            Write-Host "✅ BlueStacks launched with $image"
             Start-Sleep -Seconds 90
-          } else {
-            Write-Warning "HD-Player.exe not found"
           }
 
       - name: "⏳ Keep Alive"
         run: |
           $keep = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
           if ($keep -gt 360) { $keep = 360 }
-
-          Write-Host "==============================================="
           Write-Host "🔗 Connect: https://remotedesktop.google.com/access"
-          Write-Host "🎮 BlueStacks: Ready (auto-optimized)"
-          Write-Host "⏳ Alive for $keep minutes"
-          Write-Host "==============================================="
-
           if ($keep -gt 0) { Start-Sleep -Seconds ($keep * 60) }
-          Write-Host "🛑 Done."
