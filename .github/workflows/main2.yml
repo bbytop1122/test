@@ -1,0 +1,219 @@
+name: "🖥️ CRD + BlueStacks 5 Full Auto"
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_code:
+        description: "CRD 4/... token from remotedesktop.google.com/headless"
+        required: true
+      crd_pin:
+        description: "CRD PIN (6+ digits)"
+        required: true
+        default: "123456"
+      android_image:
+        description: "BlueStacks Android image"
+        required: false
+        default: "Nougat32"
+        type: choice
+        options:
+          - Nougat32
+          - Nougat64
+          - Pie64
+          - Rvc64
+          - Tiramisu64
+      keepalive_min:
+        description: "Keep alive minutes (max 360)"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: "Full Auto Setup"
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: "📝 Stage Inputs"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path "$env:RUNNER_TEMP\code.txt" -Value '${{ inputs.crd_code }}' -NoNewline
+          Set-Content -Path "$env:RUNNER_TEMP\pin.txt" -Value '${{ inputs.crd_pin }}' -NoNewline
+          Set-Content -Path "$env:RUNNER_TEMP\keep.txt" -Value '${{ inputs.keepalive_min }}' -NoNewline
+          Set-Content -Path "$env:RUNNER_TEMP\image.txt" -Value '${{ inputs.android_image }}' -NoNewline
+
+      - name: "🔧 Install & Register CRD"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $raw = (Get-Content "$env:RUNNER_TEMP\code.txt" -Raw).Trim()
+          $pin = (Get-Content "$env:RUNNER_TEMP\pin.txt" -Raw).Trim()
+          Write-Host "::add-mask::$raw"
+          Write-Host "::add-mask::$pin"
+          if ($raw -match '--code="?([^"\s]+)"?') { $raw = $matches[1] }
+
+          $msi = "$env:RUNNER_TEMP\crdhost.msi"
+          Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -UseBasicParsing
+          $p = Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { Write-Error "CRD MSI failed"; exit 1 }
+
+          $exe = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          $args = @("--code=$raw","--redirect-url=https://remotedesktop.google.com/_/oauthredirect","--name=$env:COMPUTERNAME","--pin=$pin")
+          $p = Start-Process -FilePath $exe -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -eq 0) { Write-Host "✅ CRD ready" } else { exit 1 }
+
+      - name: "📦 Download BlueStacks Offline Installer"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          # Official BlueStacks 5 offline installer URL [citation:7][citation:16]
+          $bsExe = "$env:RUNNER_TEMP\BlueStacksFullInstaller.exe"
+          $url = "https://cdn3.bluestacks.com/downloads/windows/nxt/5.22.166.1003/BlueStacksFullInstaller_5.22.166.1003_amd64_native.exe"
+          Invoke-WebRequest -Uri $url -OutFile $bsExe -UseBasicParsing
+
+          if (-not (Test-Path $bsExe) -or (Get-Item $bsExe).Length -lt 10000000) {
+            Write-Error "BlueStacks download failed"; exit 1
+          }
+          Write-Host "✅ Downloaded: $([Math]::Round((Get-Item $bsExe).Length / 1MB, 2)) MB"
+
+      - name: "🚀 Auto Install BlueStacks (Selected Image)"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bsExe = "$env:RUNNER_TEMP\BlueStacksFullInstaller.exe"
+          $image = (Get-Content "$env:RUNNER_TEMP\image.txt" -Raw).Trim()
+
+          Write-Host "Installing BlueStacks with image: $image"
+
+          # Official silent install with image selection [citation:1][citation:2][citation:7]
+          # --defaultImageName + --imageToLaunch = Android version auto-select
+          $args = @(
+            "-s",
+            "--defaultImageName", $image,
+            "--imageToLaunch", $image
+          )
+
+          $p = Start-Process -FilePath $bsExe -ArgumentList $args -Wait -PassThru -NoNewWindow
+          Write-Host "Install exit: $($p.ExitCode)"
+
+          # Wait for post-install (BlueStacks X launcher etc)
+          Start-Sleep -Seconds 120
+
+          # Verify
+          $found = @(
+            "${env:ProgramFiles}\BlueStacks_nxt\HD-Player.exe",
+            "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) { Write-Host "✅ BlueStacks installed: $found" }
+          else { Write-Warning "BlueStacks not found at expected paths" }
+
+      - name: "🎮 Apply Auto Optimizations"
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          # ===== 1. REGISTRY: EULA Auto-Accept ===== [citation:3]
+          $eulaKeys = @(
+            "HKLM:\SOFTWARE\BlueStacks_nxt",
+            "HKLM:\SOFTWARE\BlueStacks",
+            "HKCU:\SOFTWARE\BlueStacks_nxt"
+          )
+          foreach ($ek in $eulaKeys) {
+            if (-not (Test-Path $ek)) { New-Item -Path $ek -Force | Out-Null }
+            Set-ItemProperty -Path $ek -Name "EULA" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $ek -Name "EulaAccepted" -Value 1 -Type DWord -ErrorAction SilentlyContinue
+          }
+          Write-Host "✅ EULA auto-accepted"
+
+          # ===== 2. REGISTRY: RAM + CPU + Resolution =====
+          $regPaths = @(
+            "HKLM:\SOFTWARE\BlueStacks_nxt\Guests\Android",
+            "HKLM:\SOFTWARE\BlueStacks\Guests\Android"
+          )
+          foreach ($rp in $regPaths) {
+            if (Test-Path $rp) {
+              Set-ItemProperty -Path $rp -Name "Memory"  -Value 4096 -Type DWord -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path $rp -Name "CpuCore" -Value 4    -Type DWord -ErrorAction SilentlyContinue
+            }
+          }
+
+          $fbPaths = @(
+            "HKLM:\SOFTWARE\BlueStacks_nxt\Guests\Android\FrameBuffer\0",
+            "HKLM:\SOFTWARE\BlueStacks\Guests\Android\FrameBuffer\0"
+          )
+          foreach ($fp in $fbPaths) {
+            if (Test-Path $fp) {
+              Set-ItemProperty -Path $fp -Name "Width"  -Value 640 -Type DWord -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path $fp -Name "Height" -Value 480 -Type DWord -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "✅ RAM/CPU/Resolution set"
+
+          # ===== 3. bluestacks.conf optimization =====
+          $dataDirs = @("$env:ProgramData\BlueStacks_nxt", "$env:ProgramData\BlueStacks")
+          $dataDir = $dataDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($dataDir) {
+            $confPath = Join-Path $dataDir "bluestacks.conf"
+            if (Test-Path $confPath) {
+              $conf = Get-Content $confPath -Raw
+              # Graphics: OpenGL (compatibility for software rendering)
+              $conf = $conf -replace 'graphics_renderer="DirectX"', 'graphics_renderer="OpenGL"'
+              $conf = $conf -replace 'graphics_engine="Performance"', 'graphics_engine="Compatibility"'
+              $conf = $conf -replace 'enable_astc_textures="1"', 'enable_astc_textures="0"'
+              # Performance
+              $conf = $conf -replace 'cpus="\d+"', 'cpus="4"'
+              $conf = $conf -replace 'ram="\d+"', 'ram="4096"'
+              $conf = $conf -replace 'fb_width="\d+"', 'fb_width="640"'
+              $conf = $conf -replace 'fb_height="\d+"', 'fb_height="480"'
+              $conf = $conf -replace 'fps="\d+"', 'fps="60"'
+              # Disable heavy features
+              $conf = $conf -replace 'enable_vsync="1"', 'enable_vsync="0"'
+              $conf = $conf -replace 'enable_sound="1"', 'enable_sound="0"'
+              $conf = $conf -replace 'enable_webcam="1"', 'enable_webcam="0"'
+              $conf = $conf -replace 'enable_mic="1"', 'enable_mic="0"'
+              $conf = $conf -replace 'show_sidebar="1"', 'show_sidebar="0"'
+              Set-Content -Path $confPath -Value $conf -NoNewline
+              Write-Host "✅ bluestacks.conf optimized"
+            }
+          }
+
+      - name: "🚀 Auto Launch BlueStacks"
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $image = (Get-Content "$env:RUNNER_TEMP\image.txt" -Raw).Trim()
+
+          $bsPlayer = @(
+            "${env:ProgramFiles}\BlueStacks_nxt\HD-Player.exe",
+            "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($bsPlayer) {
+            # Launch with instance flag to auto-open selected image [citation:3]
+            Start-Process -FilePath $bsPlayer -ArgumentList "--instance", $image -NoNewWindow
+            Write-Host "✅ BlueStacks launched with $image"
+            Start-Sleep -Seconds 90
+          } else {
+            Write-Warning "HD-Player.exe not found"
+          }
+
+      - name: "⏳ Keep Alive"
+        run: |
+          $keep = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
+          if ($keep -gt 360) { $keep = 360 }
+
+          Write-Host "==============================================="
+          Write-Host "🔗 Connect: https://remotedesktop.google.com/access"
+          Write-Host "🎮 BlueStacks: Ready (auto-optimized)"
+          Write-Host "⏳ Alive for $keep minutes"
+          Write-Host "==============================================="
+
+          if ($keep -gt 0) { Start-Sleep -Seconds ($keep * 60) }
+          Write-Host "🛑 Done."
