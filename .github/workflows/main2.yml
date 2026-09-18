@@ -75,7 +75,7 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          # Official BlueStacks 5 offline installer URL [citation:7][citation:16]
+          # Official BlueStacks 5 offline installer URL
           $bsExe = "$env:RUNNER_TEMP\BlueStacksFullInstaller.exe"
           $url = "https://cdn3.bluestacks.com/downloads/windows/nxt/5.22.166.1003/BlueStacksFullInstaller_5.22.166.1003_amd64_native.exe"
           Invoke-WebRequest -Uri $url -OutFile $bsExe -UseBasicParsing
@@ -93,8 +93,7 @@ jobs:
 
           Write-Host "Installing BlueStacks with image: $image"
 
-          # Official silent install with image selection [citation:1][citation:2][citation:7]
-          # --defaultImageName + --imageToLaunch = Android version auto-select
+          # Official silent install with image selection [citation:1][citation:2]
           $args = @(
             "-s",
             "--defaultImageName", $image,
@@ -104,7 +103,7 @@ jobs:
           $p = Start-Process -FilePath $bsExe -ArgumentList $args -Wait -PassThru -NoNewWindow
           Write-Host "Install exit: $($p.ExitCode)"
 
-          # Wait for post-install (BlueStacks X launcher etc)
+          # Wait for post-install
           Start-Sleep -Seconds 120
 
           # Verify
@@ -119,7 +118,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
 
-          # ===== 1. REGISTRY: EULA Auto-Accept ===== [citation:3]
+          # ===== 1. REGISTRY: EULA Auto-Accept =====
           $eulaKeys = @(
             "HKLM:\SOFTWARE\BlueStacks_nxt",
             "HKLM:\SOFTWARE\BlueStacks",
@@ -196,7 +195,6 @@ jobs:
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
           if ($bsPlayer) {
-            # Launch with instance flag to auto-open selected image [citation:3]
             Start-Process -FilePath $bsPlayer -ArgumentList "--instance", $image -NoNewWindow
             Write-Host "✅ BlueStacks launched with $image"
             Start-Sleep -Seconds 90
