@@ -32,18 +32,13 @@ permissions:
 jobs:
   setup:
     name: "Full Auto Setup"
-    runs-on: windows-2022
+    runs-on: windows-2025
 
     defaults:
       run:
         shell: pwsh
 
     steps:
-      - name: "📦 Install winget"
-        uses: Cyberboss/install-winget@v1
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: "📝 Stage Inputs"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -79,9 +74,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
 
-          # Winget now installed by previous step
+          # --source winget skips the problematic msstore source [citation:2][citation:7]
           winget install --id BlueStack.BlueStacks `
             --exact 5.22.166.1003 `
+            --source winget `
             --silent `
             --accept-package-agreements `
             --accept-source-agreements
@@ -94,13 +90,13 @@ jobs:
             "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($found) { Write-Host "✅ Found: $found" }
-          else { Write-Warning "BlueStacks not found at expected paths" }
+          else { Write-Error "BlueStacks not found"; exit 1 }
 
       - name: "🎮 Apply Auto Optimizations"
         run: |
           $ErrorActionPreference = 'Continue'
 
-          # EULA Auto-Accept
+          # ===== 1. REGISTRY: EULA Auto-Accept =====
           $eulaKeys = @(
             "HKLM:\SOFTWARE\BlueStacks_nxt",
             "HKLM:\SOFTWARE\BlueStacks",
@@ -111,8 +107,9 @@ jobs:
             Set-ItemProperty -Path $ek -Name "EULA" -Value 1 -Type DWord -ErrorAction SilentlyContinue
             Set-ItemProperty -Path $ek -Name "EulaAccepted" -Value 1 -Type DWord -ErrorAction SilentlyContinue
           }
+          Write-Host "✅ EULA auto-accepted"
 
-          # RAM + CPU + Resolution
+          # ===== 2. REGISTRY: RAM + CPU + Resolution =====
           $regPaths = @(
             "HKLM:\SOFTWARE\BlueStacks_nxt\Guests\Android",
             "HKLM:\SOFTWARE\BlueStacks\Guests\Android"
@@ -134,10 +131,12 @@ jobs:
               Set-ItemProperty -Path $fp -Name "Height" -Value 480 -Type DWord -ErrorAction SilentlyContinue
             }
           }
+          Write-Host "✅ RAM/CPU/Resolution set"
 
-          # bluestacks.conf optimization
+          # ===== 3. bluestacks.conf optimization =====
           $dataDirs = @("$env:ProgramData\BlueStacks_nxt", "$env:ProgramData\BlueStacks")
           $dataDir = $dataDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
+
           if ($dataDir) {
             $confPath = Join-Path $dataDir "bluestacks.conf"
             if (Test-Path $confPath) {
@@ -156,6 +155,7 @@ jobs:
               $conf = $conf -replace 'enable_mic="1"', 'enable_mic="0"'
               $conf = $conf -replace 'show_sidebar="1"', 'show_sidebar="0"'
               Set-Content -Path $confPath -Value $conf -NoNewline
+              Write-Host "✅ bluestacks.conf optimized"
             }
           }
 
@@ -163,18 +163,30 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $image = (Get-Content "$env:RUNNER_TEMP\image.txt" -Raw).Trim()
+
           $bsPlayer = @(
             "${env:ProgramFiles}\BlueStacks_nxt\HD-Player.exe",
             "${env:ProgramFiles}\BlueStacks\HD-Player.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
           if ($bsPlayer) {
             Start-Process -FilePath $bsPlayer -ArgumentList "--instance", $image -NoNewWindow
+            Write-Host "✅ BlueStacks launched with $image"
             Start-Sleep -Seconds 90
+          } else {
+            Write-Warning "HD-Player.exe not found"
           }
 
       - name: "⏳ Keep Alive"
         run: |
           $keep = [int](Get-Content "$env:RUNNER_TEMP\keep.txt" -Raw).Trim()
           if ($keep -gt 360) { $keep = 360 }
+
+          Write-Host "==============================================="
           Write-Host "🔗 Connect: https://remotedesktop.google.com/access"
+          Write-Host "🎮 BlueStacks: Ready (auto-optimized)"
+          Write-Host "⏳ Alive for $keep minutes"
+          Write-Host "==============================================="
+
           if ($keep -gt 0) { Start-Sleep -Seconds ($keep * 60) }
+          Write-Host "🛑 Done."
